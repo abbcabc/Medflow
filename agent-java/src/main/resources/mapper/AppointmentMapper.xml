@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.medflow.mapper.AppointmentMapper">
+    <!-- 连表查询基础字段 -->
+    <sql id="Base_Join_Column">
+        a.appointment_id,
+        a.patient_id,
+        a.doctor_id,
+        a.schedule_id,
+        a.dept_id,
+        a.appointment_number,
+        a.appointment_date,
+        a.time_slot,
+        a.symptoms_description,
+        a.status,
+        a.created_at,
+        a.completed_at,
+        a.cancelled_at,
+        a.cancel_reason,
+        p.real_name,
+        d.doctor_name,
+        de.dept_name
+    </sql>
+
+    <!-- 连表查询预约列表 -->
+    <select id="selectAppointmentList" resultType="org.example.medflow.entity.Appointment">
+        SELECT <include refid="Base_Join_Column"/>
+        FROM appointment a
+        LEFT JOIN patient p ON a.patient_id = p.patient_id
+        LEFT JOIN doctor d ON a.doctor_id = d.doctor_id
+        LEFT JOIN department de ON a.dept_id = de.dept_id
+        <where>
+            <if test="keyword != null and keyword != ''">
+                (a.appointment_number LIKE CONCAT('%',#{keyword},'%')
+                OR p.real_name LIKE CONCAT('%',#{keyword},'%')
+                OR d.doctor_name LIKE CONCAT('%',#{keyword},'%')
+                OR de.dept_name LIKE CONCAT('%',#{keyword},'%'))
+            </if>
+            <if test="status != null and status != ''">
+                AND a.status = #{status}
+            </if>
+        </where>
+        ORDER BY a.created_at DESC
+    </select>
+
+    <!-- 查询预约详情 -->
+    <select id="selectAppointmentDetail" resultType="org.example.medflow.entity.Appointment">
+        SELECT <include refid="Base_Join_Column"/>
+        FROM appointment a
+        LEFT JOIN patient p ON a.patient_id = p.patient_id
+        LEFT JOIN doctor d ON a.doctor_id = d.doctor_id
+        LEFT JOIN department de ON a.dept_id = de.dept_id
+        WHERE a.appointment_id = #{appointmentId}
+    </select>
+
+    <!-- 修改预约状态 -->
+    <update id="updateAppointmentStatus">
+        UPDATE appointment
+        SET status = #{status}
+        <if test="status == 'completed'">
+            , completed_at = NOW()
+        </if>
+        <if test="status == 'cancelled'">
+            , cancelled_at = NOW()
+        </if>
+        WHERE appointment_id = #{appointmentId}
+    </update>
+
+    <!--医生界面-->
+    <!-- 通用结果集：关联患者表的预约记录 -->
+    <resultMap id="PatientAppointmentRecordMap" type="org.example.medflow.vo.PatientAppointmentRecordVO">
+        <result column="appointment_id" property="appointmentId"/>
+        <result column="patient_id" property="patientId"/>
+        <result column="real_name" property="patientName"/>
+        <result column="appointment_number" property="appointmentNumber"/>
+        <result column="appointment_date" property="appointmentDate"/>
+        <result column="time_slot" property="timeSlot"/>
+        <result column="symptoms_description" property="symptomsDescription"/>
+        <result column="status" property="status"/>
+        <result column="created_at" property="createdAt"/>
+        <result column="cancel_reason" property="cancelReason"/>
+    </resultMap>
+
+    <!-- 查询当前接诊患者的预约记录 -->
+    <select id="selectCurrentReceptionByDoctorId" resultMap="PatientAppointmentRecordMap">
+        SELECT a.*, p.real_name
+        FROM appointment a
+                 LEFT JOIN patient p ON a.patient_id = p.patient_id
+        WHERE a.doctor_id = #{doctorId}
+          AND a.status = 'confirmed'
+        ORDER BY a.appointment_date ASC, a.time_slot ASC
+    </select>
+
+    <!-- 查询患者与该医生的所有就诊记录 -->
+    <select id="selectPatientAllRecordsByDocIdAndPatId" resultMap="PatientAppointmentRecordMap">
+        SELECT a.*, p.real_name
+        FROM appointment a
+                 LEFT JOIN patient p ON a.patient_id = p.patient_id
+        WHERE a.doctor_id = #{doctorId}
+          AND a.patient_id = #{patientId}
+        ORDER BY a.created_at DESC
+    </select>
+</mapper>
