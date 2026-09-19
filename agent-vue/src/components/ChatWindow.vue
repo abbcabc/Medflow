@@ -1,7 +1,7 @@
 <template>
   <div class="chat-page">
     <PatientSidebar>
-      <button class="side-nav-btn primary-action" @click="newChat">
+      <button class="side-nav-btn primary-action" @click="startNewSession">
         <i class="fa-solid fa-plus"></i>新会话
       </button>
       <button class="side-nav-btn" @click="goProfile">
@@ -26,7 +26,35 @@
           <span class="title-badge"><i class="fa-solid fa-robot"></i></span>
           <span>小智 AI 伴诊助手</span>
         </div>
-        <span class="chat-sub">智能导诊 · 号源查询 · 预约挂号</span>
+        <!-- 多会话切换栏 -->
+        <div class="session-bar">
+          <el-select
+            v-model="currentSessionId"
+            class="session-select"
+            placeholder="选择会话"
+            :disabled="isSending"
+            @change="onSessionChange"
+          >
+            <el-option
+              v-for="s in sessionList"
+              :key="s.id"
+              :value="s.id"
+              :label="s.title || '新对话'"
+            >
+              <div class="session-option">
+                <span class="session-option-title">{{ s.title || '新对话' }}</span>
+                <i
+                  class="fa-solid fa-trash-can session-del"
+                  title="删除会话"
+                  @click.stop="removeSession(s)"
+                ></i>
+              </div>
+            </el-option>
+          </el-select>
+          <el-button class="new-session-btn" :disabled="isSending" @click="startNewSession">
+            <i class="fa-solid fa-plus"></i>&nbsp;新会话
+          </el-button>
+        </div>
       </header>
 
       <div class="message-list" ref="messageListRef">
@@ -74,8 +102,8 @@ import { useRouter } from 'vue-router'
 import axios from 'axios'
 import DOMPurify from 'dompurify'
 import { handle401 } from '@/utils/auth401'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PatientSidebar from './PatientSidebar.vue'
-import { v4 as uuidv4 } from 'uuid'
 
 // XSS 防护：v-html 渲染前净化（默认配置即可，禁止 script/事件属性）
 const sanitizeContent = (content) => DOMPurify.sanitize(content || '')
@@ -87,19 +115,19 @@ const abortController = ref(null)
 const inputMessage = ref('')
 const messages = ref([])
 
-// 获取用户ID（这里假设用户ID存储在localStorage中）
-const getUserId = () => {
-  let userId = localStorage.getItem('patientId')
-  if (!userId) {
-    userId = uuidv4()
-    localStorage.setItem('patientId', userId)
-  }
-  return userId
+// 多会话状态：sessionId 即服务端聊天记忆的 memoryId，会话归属由服务端按登录态校验
+const sessionList = ref([])
+const currentSessionId = ref(null)
+const LAST_SESSION_KEY = 'chat_last_session_id'
+
+const authHeaders = () => {
+  const token = localStorage.getItem('patientToken') || localStorage.getItem('token')
+  return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
 onMounted(() => {
   watch(messages, () => scrollToBottom(), { deep: true })
-  loadChatHistory()
+  initSessions()
 })
 
 const scrollToBottom = () => {
@@ -108,83 +136,173 @@ const scrollToBottom = () => {
   }
 }
 
-// 加载聊天历史记录
-const loadChatHistory = async () => {
-  const userId = getUserId()
+// ==================== 会话管理 ====================
+
+// 统一处理会话接口响应：业务码 401 走患者端登录跳转，其余返回响应体
+const unwrap = (response) => {
+  if (response.data && response.data.code === 401) {
+    handle401('patient')
+    return null
+  }
+  return response.data
+}
+
+// 进入页面：拉取会话列表并恢复上次会话（localStorage）；无会话则自动创建
+const initSessions = async () => {
   try {
-    const response = await axios.get(`/api/agent/chat/history`, {
-      params: { userId },
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem('patientToken') || localStorage.getItem('token') || ''}`
-      }
-    })
-    
-    // console.log('后端返回的完整数据:', response.data)
-    
-    if (response.data && response.data.length > 0) {
-      // 过滤并转换消息
-      messages.value = response.data
-        .filter(msg => {
-          // 只保留用户和AI消息
-          if (msg.type !== 'USER' && msg.type !== 'AI') return false
-          
-          // 过滤掉系统自动消息
-          if (msg.type === 'USER') {
-            const content = msg.displayText || msg.text || ''
-            if (content.includes('当前用户信息：用户ID=') && 
-                content.trim() === '当前用户信息：用户ID=7,不要在对话中展示用户ID') {
-              return false
-            }
-          }
-          return true
-        })
-        .map(msg => {
-          let content = msg.displayText || msg.text || ''
-          
-          // 清理用户消息中的系统提示信息
-          if (msg.type === 'USER') {
-            // 删除各种系统提示信息
-            const patterns = [
-              '\n\nAnswer using',
-              'Answer using',
-              '当前用户信息：用户ID=',
-              '不要在对话中展示用户ID',
-            ]
-            
-            patterns.forEach(pattern => {
-              const index = content.indexOf(pattern)
-              if (index !== -1) {
-                content = content.substring(0, index)
-              }
-            })
-          }
-          
-          return {
-            isUser: msg.type === 'USER',
-            content: content.trim(),
-            isTyping: false,
-            isThinking: false
-          }
-        })
-        .filter(msg => msg.content.length > 0) // 确保内容不为空
-      
-      console.log('转换后的消息列表:', messages.value)
-      
-      if (messages.value.length === 0) {
-        hello()
-      }
+    const response = await axios.get('/api/agent/session/list', { headers: authHeaders() })
+    const body = unwrap(response)
+    if (!body) return
+    sessionList.value = body.data || []
+    if (sessionList.value.length > 0) {
+      const saved = Number(localStorage.getItem(LAST_SESSION_KEY))
+      const target = sessionList.value.find((s) => s.id === saved) || sessionList.value[0]
+      currentSessionId.value = target.id
+      localStorage.setItem(LAST_SESSION_KEY, String(target.id))
+      await loadChatHistory(target.id)
     } else {
-      hello()
+      await startNewSession()
     }
   } catch (error) {
-    console.error('加载聊天历史失败:', error)
-    hello()
+    console.error('加载会话列表失败:', error)
+    showWelcome()
   }
 }
 
-const hello = () => {
-  const sessionId = getUserId()
-  sendRequest('你好,当前会话id是'+sessionId)
+// 新建会话：清空消息区并发起欢迎语；当前会话还没产生对话时不重复创建
+const startNewSession = async () => {
+  if (isSending.value) stopGeneration()
+  const hasContent = messages.value.some((m) => m.isUser)
+  if (currentSessionId.value && !hasContent) return
+  try {
+    const response = await axios.post('/api/agent/session', null, { headers: authHeaders() })
+    const body = unwrap(response)
+    if (!body) return
+    sessionList.value.unshift(body.data)
+    currentSessionId.value = body.data.id
+    localStorage.setItem(LAST_SESSION_KEY, String(body.data.id))
+    messages.value = []
+    showWelcome()
+  } catch (error) {
+    console.error('创建会话失败:', error)
+  }
+}
+
+// 删除会话：连同服务端聊天记忆一起删除；删除当前会话时自动切换
+const removeSession = async (session) => {
+  try {
+    await ElMessageBox.confirm('删除后该会话的聊天记录将无法恢复，确定删除？', '删除会话', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+  try {
+    const response = await axios.delete(`/api/agent/session/${session.id}`, { headers: authHeaders() })
+    if (!unwrap(response)) return
+    sessionList.value = sessionList.value.filter((s) => s.id !== session.id)
+    if (currentSessionId.value === session.id) {
+      if (sessionList.value.length > 0) {
+        currentSessionId.value = sessionList.value[0].id
+        localStorage.setItem(LAST_SESSION_KEY, String(currentSessionId.value))
+        await loadChatHistory(currentSessionId.value)
+      } else {
+        currentSessionId.value = null
+        await startNewSession()
+      }
+    }
+    ElMessage.success('会话已删除')
+  } catch (error) {
+    console.error('删除会话失败:', error)
+  }
+}
+
+// 切换会话：中断进行中的生成，加载目标会话历史
+const onSessionChange = async (id) => {
+  if (isSending.value) stopGeneration()
+  currentSessionId.value = id
+  localStorage.setItem(LAST_SESSION_KEY, String(id))
+  await loadChatHistory(id)
+}
+
+// 静默刷新会话列表（首条消息后标题在服务端已生成）
+const refreshSessions = async () => {
+  try {
+    const response = await axios.get('/api/agent/session/list', { headers: authHeaders() })
+    const body = unwrap(response)
+    if (body) sessionList.value = body.data || []
+  } catch {
+    /* 静默失败，不影响聊天主流程 */
+  }
+}
+
+// ==================== 消息与流式对话 ====================
+
+// 加载指定会话的聊天历史
+const loadChatHistory = async (sessionId) => {
+  try {
+    const response = await axios.get('/api/agent/chat/history', {
+      params: { sessionId },
+      headers: authHeaders(),
+    })
+    const list = unwrap(response) || []
+    messages.value = list
+      .filter((msg) => {
+        // 只保留用户和AI消息
+        if (msg.type !== 'USER' && msg.type !== 'AI') return false
+        // 过滤掉历史版本遗留的系统自动消息
+        if (msg.type === 'USER') {
+          const content = msg.displayText || msg.text || ''
+          if (
+            content.includes('当前用户信息：用户ID=') &&
+            content.trim() === '当前用户信息：用户ID=7,不要在对话中展示用户ID'
+          ) {
+            return false
+          }
+        }
+        return true
+      })
+      .map((msg) => {
+        let content = msg.displayText || msg.text || ''
+        // 清理用户消息中的系统提示信息
+        if (msg.type === 'USER') {
+          const patterns = ['\n\nAnswer using', 'Answer using', '当前用户信息：用户ID=', '不要在对话中展示用户ID']
+          patterns.forEach((pattern) => {
+            const index = content.indexOf(pattern)
+            if (index !== -1) {
+              content = content.substring(0, index)
+            }
+          })
+        }
+        return {
+          isUser: msg.type === 'USER',
+          content: content.trim(),
+          isTyping: false,
+          isThinking: false,
+        }
+      })
+      .filter((msg) => msg.content.length > 0)
+
+    if (messages.value.length === 0) {
+      showWelcome()
+    }
+  } catch (error) {
+    console.error('加载聊天历史失败:', error)
+    showWelcome()
+  }
+}
+
+// 空会话的本地欢迎语：不调用模型、不写入记忆，避免把"你好"抢先占住会话标题，
+// 让第一条真实提问成为标题来源
+const showWelcome = () => {
+  messages.value.push({
+    isUser: false,
+    content: '您好，我是您的AI伴诊助手小智，可以帮您智能导诊、查询号源、预约挂号、查询或取消预约。请问有什么可以帮您？',
+    isTyping: false,
+    isThinking: false,
+  })
 }
 
 const sendMessage = () => {
@@ -203,9 +321,13 @@ const stopGeneration = () => {
 }
 
 const sendRequest = (message) => {
+  if (isSending.value) return
+  if (!currentSessionId.value) {
+    ElMessage.warning('会话尚未就绪，请稍候重试')
+    return
+  }
   isSending.value = true
-  const userId = getUserId()
-
+  const firstInSession = !messages.value.some((m) => m.isUser)
 
   // 添加用户消息
   const userMsg = {
@@ -214,11 +336,7 @@ const sendRequest = (message) => {
     isTyping: false,
     isThinking: false,
   }
-
-  // 第一条默认发送的用户消息"你好"不放入会话列表
-  if(messages.value.length > 0){
-    messages.value.push(userMsg)
-  }
+  messages.value.push(userMsg)
 
   // 添加机器人加载消息
   const botMsg = {
@@ -234,16 +352,12 @@ const sendRequest = (message) => {
   const controller = new AbortController()
   abortController.value = controller
 
-  const headers = { 'Content-Type': 'application/json' }
-  const token = localStorage.getItem('patientToken') || localStorage.getItem('token')
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
+  const headers = { 'Content-Type': 'application/json', ...authHeaders() }
 
   fetch('/api/agent/chat', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ memoryId: userId, message }),
+    body: JSON.stringify({ sessionId: currentSessionId.value, message }),
     signal: controller.signal,
   })
     .then(async (response) => {
@@ -258,22 +372,29 @@ const sendRequest = (message) => {
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`)
       }
-      // 真流式：逐块读取并增量渲染
+      // 真流式：SSE 协议解析。服务端把每个模型 token 包装为 "data: <token>" 事件，
+      // 事件间以空行分隔；token 内部的换行会被拆成多条 data: 行，需按行累积还原
       const reader = response.body.getReader()
       const decoder = new TextDecoder('utf-8')
+      let sseBuf = ''
       while (true) {
         const { value, done } = await reader.read()
         if (done) break
-        const chunk = decoder.decode(value, { stream: true })
-        if (chunk) {
-          lastMsg.content += chunk // 增量更新
-          scrollToBottom() // 实时滚动
+        sseBuf += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        let sep
+        while ((sep = sseBuf.indexOf('\n\n')) !== -1) {
+          const event = sseBuf.slice(0, sep)
+          sseBuf = sseBuf.slice(sep + 2)
+          const text = event
+            .split('\n')
+            .filter((line) => line.startsWith('data:'))
+            .map((line) => line.slice(5).replace(/^ /, ''))
+            .join('\n')
+          if (text) {
+            lastMsg.content += text
+            scrollToBottom() // 实时滚动
+          }
         }
-      }
-      const tail = decoder.decode()
-      if (tail) {
-        lastMsg.content += tail
-        scrollToBottom()
       }
     })
     .catch((error) => {
@@ -281,23 +402,27 @@ const sendRequest = (message) => {
         // 用户主动停止：保留已生成内容，不提示错误
       } else {
         console.error('流式错误:', error)
-        messages.value.at(-1).content = '请求失败，请重试'
+        // 切换会话/新建会话可能已清空消息数组，需判空防止此处异常阻断 finally
+        const last = messages.value.at(-1)
+        if (last) last.content = '请求失败，请重试'
       }
     })
     .finally(() => {
-      // 流结束后隐藏加载动画
-      messages.value.at(-1).isTyping = false
+      // 注意：以下语句必须在任何可能抛异常的取值之前完成，
+      // 否则 isSending 复位失败会导致"停止"按钮永远变不回"发送"
       isSending.value = false
       abortController.value = null
+      const last = messages.value.at(-1)
+      if (last) {
+        last.isTyping = false
+        last.isThinking = false
+      }
+      // 本会话首条消息后服务端开始生成标题，先立即刷新一次，再延迟刷新拿到 LLM 生成的标题
+      if (firstInSession) {
+        refreshSessions()
+        setTimeout(() => refreshSessions(), 5000)
+      }
     })
-}
-
-const newChat = () => {
-  // 清除本地存储的用户ID和消息
-  // localStorage.removeItem('patientId')
-  messages.value = []
-  // 重新生成用户ID并发送欢迎消息
-  hello()
 }
 
 // 退出登录：清除本地登录态与会话标识，回到患者登录页
@@ -305,6 +430,7 @@ const handleLogout = () => {
   localStorage.removeItem('patientToken')
   localStorage.removeItem('patientId')
   localStorage.removeItem('token')
+  localStorage.removeItem(LAST_SESSION_KEY)
   messages.value = []
   inputMessage.value = ''
   router.push('/plogin')
@@ -374,10 +500,41 @@ export default {
   color: #fff;
   font-size: 14px;
 }
-.chat-sub {
+
+/* 会话切换栏 */
+.session-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.session-select {
+  width: 240px;
+}
+.session-select :deep(.el-select__wrapper) {
+  border-radius: 10px;
+}
+.session-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.session-option-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-del {
+  color: #c0ccda;
   font-size: 12px;
-  color: #8aa0bd;
-  letter-spacing: 1px;
+  padding: 2px 4px;
+}
+.session-del:hover {
+  color: #f2789f;
+}
+.new-session-btn {
+  border-radius: 10px;
+  font-weight: 600;
 }
 
 /* 消息列表 */
@@ -500,7 +657,7 @@ export default {
 @media (max-width: 768px) {
   .chat-page { flex-direction: column; }
   .chat-main { padding: 10px 12px 14px; }
-  .chat-sub { display: none; }
+  .session-select { width: 150px; }
   .msg-row { max-width: 92%; }
 }
 </style>

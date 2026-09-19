@@ -15,8 +15,8 @@ import static dev.langchain4j.service.spring.AiServiceWiringMode.EXPLICIT;
         streamingChatModel = "qwenStreamingChatModel",
         tools = "appointmentTool", //tools配置
         chatMemoryProvider = "chatMemoryProviderAgent",
-//        contentRetriever = "contentRetrieverAgent"
-        contentRetriever = "contentRetrieverAgentPincone"
+//        contentRetriever = "contentRetrieverAgentPincone"
+        retrievalAugmentor = "retrievalAugmentor" // 高级 RAG：查询改写（多轮指代消解）+ 向量检索
 )
 
 

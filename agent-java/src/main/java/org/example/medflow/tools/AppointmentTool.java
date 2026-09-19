@@ -6,10 +6,11 @@ import dev.langchain4j.agent.tool.Tool;
 import org.example.medflow.context.ThreadLocalContext;
 import org.example.medflow.dto.Result;
 import org.example.medflow.entity.Appointment;
+import org.example.medflow.entity.Department;
+import org.example.medflow.entity.Doctor;
 import org.example.medflow.entity.Patient;
 import org.example.medflow.entity.PendingAppointment;
 import org.example.medflow.service.*;
-import org.example.medflow.store.MongoChatMemoryStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,8 +42,6 @@ public class AppointmentTool {
     private static final int RANDOM_PART_MAX = 9999;
 
     @Autowired
-    private MongoChatMemoryStore mongoChatMemoryStore;
-    @Autowired
     private AppointmentService appointmentService;
 
     @Autowired
@@ -50,6 +49,9 @@ public class AppointmentTool {
 
     @Autowired
     private DoctorService doctorService;
+
+    @Autowired
+    private DepartmentService departmentService;
 
     @Lazy
     @Autowired
@@ -98,6 +100,34 @@ public class AppointmentTool {
         return sb.toString();
     }
 
+    @Tool(name = "查医生信息", value = "查询医生的医生ID、所属科室、职称与擅长方向。用户提到医生姓名、或预约挂号/查号源前不知道医生ID(deptId/doctorId)时必须先调用本工具；支持姓名模糊匹配（可容错个别错别字），多个结果会全部返回")
+    public String queryDoctorInfo(@P(value = "医生姓名，支持模糊匹配") String doctorName) {
+        log.info("[AI工具] 查医生信息: doctorName={}", doctorName);
+        if (doctorName == null || doctorName.trim().isEmpty()) {
+            return "请提供医生姓名，例如：王孟昭";
+        }
+        List<Doctor> doctors = doctorService.lambdaQuery()
+                .like(Doctor::getDoctorName, doctorName.trim())
+                .eq(Doctor::getIsAvailable, 1)
+                .list();
+        if (doctors == null || doctors.isEmpty()) {
+            return "未找到姓名包含“" + doctorName.trim() + "”的在职医生，请确认姓名后重试。";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Doctor d : doctors) {
+            Department dept = d.getDeptId() == null ? null : departmentService.getById(d.getDeptId());
+            sb.append("医生ID:").append(d.getDoctorId())
+                    .append(" | 姓名:").append(d.getDoctorName())
+                    .append(" | 科室ID:").append(d.getDeptId())
+                    .append(" | 科室:").append(dept == null ? "未知" : dept.getDeptName())
+                    .append(" | 职称:").append(d.getTitle() == null ? "-" : d.getTitle())
+                    .append(" | 擅长:").append(d.getSpecialty() == null ? "-" : d.getSpecialty())
+                    .append("\n");
+        }
+        sb.append("后续调用'查询是否有号源'或'预约挂号'时，请使用上述医生ID与科室ID。");
+        return sb.toString();
+    }
+
     private String getCurrentDate() {
         return LocalDate.now().format(DATE_FORMATTER);
     }
@@ -128,7 +158,7 @@ public class AppointmentTool {
         return DATE_VALID;
     }
 
-    @Tool(name = "预约挂号", value = "根据参数完成预约前置校验，校验通过后生成一张待确认单（10分钟内有效）并返回待确认单ID（pendingId）与号源摘要；无医生姓名时从向量存储获取医生；用户确认后凭 pendingId 调用工具'确认预约'完成挂号；当前日期见系统提示，会话id从上下文中获取")
+    @Tool(name = "预约挂号", value = "根据参数完成预约前置校验，校验通过后生成一张待确认单（10分钟内有效）并返回待确认单ID（pendingId）与号源摘要；医生ID与科室ID通过'查医生信息'工具查询获得；用户确认后凭 pendingId 调用工具'确认预约'完成挂号；当前日期见系统提示，会话id从上下文中获取")
     public String bookAppointment(
             @P(value = "会话ID") Long memoryId,
             @P(value = "医生ID") Integer doctorId,
@@ -205,7 +235,7 @@ public class AppointmentTool {
                 (pending.getSymptomsDescription() == null || pending.getSymptomsDescription().trim().isEmpty()) ? "无" : pending.getSymptomsDescription());
     }
 
-    @Tool(name = "查询是否有号源", value = "先从向量存储获取对应医生ID，再按医生ID、日期、时间段查询号源；当前日期见系统提示")
+    @Tool(name = "查询是否有号源", value = "先通过'查医生信息'工具获取医生ID与科室ID，再按医生ID、日期、时间段查询号源；当前日期见系统提示")
     public boolean queryDepartment(
             @P(value = "医生id") int doctorId,
             @P(value = "日期，格式：yyyy-MM-dd") String workDateStr,
@@ -326,16 +356,16 @@ public class AppointmentTool {
                 appointment.getSymptomsDescription());
     }
 
-    @Tool(name = "取消预约", value = "根据预约号取消预约，需传入取消原因；若预约已取消，直接告知用户；会话Id从对话历史获取，无需重复询问")
+    @Tool(name = "取消预约", value = "根据预约号取消预约：预约号从用户消息或'查询我的预约'工具的结果中获取，不知道预约号时先调用'查询我的预约'；需传入取消原因；若预约已取消，直接告知用户")
     public String cancelAppointment(
-//            @P(value = "预约号") String appointmentNumber,
+            @P(value = "预约号，来自'查询我的预约'工具结果或用户提供") String appointmentNumber,
             @P(value = "会话ID") Long memoryId,
             @P(value = "取消原因") String cancelReason) {
 
-        log.info("[AI工具] 取消预约: memoryId={}, 原因长度={}", memoryId, cancelReason == null ? 0 : cancelReason.length());
-        String appointmentNumber = mongoChatMemoryStore.getAppointmentNumber(memoryId);
+        log.info("[AI工具] 取消预约: memoryId={}, 预约号={}, 原因长度={}",
+                memoryId, appointmentNumber, cancelReason == null ? 0 : cancelReason.length());
         if (appointmentNumber == null || appointmentNumber.trim().isEmpty()) {
-            return "❌ 预约号不能为空，请提供有效的预约号";
+            return "❌ 预约号不能为空，请先通过'查询我的预约'工具获取预约号，或让用户提供预约号";
         }
         if (cancelReason == null || cancelReason.trim().isEmpty()) {
             return "❌ 取消原因不能为空，请说明取消预约的理由";

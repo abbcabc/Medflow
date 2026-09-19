@@ -1,6 +1,20 @@
 <template>
-  <div class="profile-page">
-    <div class="profile-wrapper">
+  <div class="app-layout">
+    <PatientSidebar>
+      <button class="side-nav-btn primary-action" @click="goChat">
+        <i class="fa-solid fa-comments"></i>返回对话
+      </button>
+      <button class="side-nav-btn" @click="goAppointment">
+        <i class="fa-solid fa-calendar-check"></i>查看预约信息
+      </button>
+      <button class="side-nav-btn" @click="goChangePassword">
+        <i class="fa-solid fa-key"></i>修改密码
+      </button>
+    </PatientSidebar>
+
+    <div class="main-content">
+      <div class="profile-page">
+        <div class="profile-wrapper">
       <!-- 顶部栏 -->
       <div class="profile-header">
         <div class="header-left">
@@ -128,14 +142,18 @@
           </div>
         </div>
       </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script>
 import axios from 'axios'
+import PatientSidebar from './PatientSidebar.vue'
 export default {
   name: 'PatientProfile',
+  components: { PatientSidebar },
   data() {
     return {
       profileForm: {
@@ -328,20 +346,38 @@ export default {
 
     goChat(){
       this.$router.push('/chat')
+    },
+
+    goAppointment(){
+      this.$router.push('/appointmentDetail')
+    },
+
+    goChangePassword(){
+      this.$router.push('/changePassword')
     }
   }
 }
 </script>
 
 <style scoped>
-.profile-page {
-  min-height: 100vh;
-  padding: 32px 16px;
+.app-layout {
+  display: flex;
+  height: 100vh;
+  background: linear-gradient(160deg, #eef4fb 0%, #f6fafd 60%, #eaf6f4 100%);
+  overflow: hidden;
+}
+
+.main-content {
+  flex: 1;
+  padding: 18px 24px 22px;
+  overflow-y: auto;
   box-sizing: border-box;
-  background:
-    radial-gradient(600px 400px at 12% 8%, rgba(29, 111, 242, 0.10), transparent 60%),
-    radial-gradient(520px 380px at 88% 90%, rgba(18, 179, 168, 0.12), transparent 60%),
-    linear-gradient(135deg, #eef4ff 0%, #f7fbff 50%, #e9f7f5 100%);
+}
+
+.profile-page {
+  min-height: 100%;
+  padding: 0;
+  box-sizing: border-box;
 }
 
 .profile-wrapper {
@@ -598,6 +634,15 @@ input:focus, select:focus {
   color: #243b5a;
   font-size: 14px;
   flex: 1;
+}
+
+@media (max-width: 768px) {
+  .app-layout {
+    flex-direction: column;
+  }
+  .main-content {
+    padding: 10px 12px 14px;
+  }
 }
 
 @media (max-width: 640px) {

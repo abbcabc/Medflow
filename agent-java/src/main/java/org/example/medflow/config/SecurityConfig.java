@@ -1,5 +1,6 @@
 package org.example.medflow.config;
 
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletResponse;
 import org.example.medflow.filter.JwtAuthenticationFilter;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
@@ -47,6 +48,12 @@ public class SecurityConfig {
                 }))
                 // 接口鉴权：白名单放行，其余全部需要认证
                 .authorizeHttpRequests(authz -> authz
+                        // 关键：放行 Servlet 内部分发类型。流式接口（SSE/Flux）完成时会触发 ASYNC 二次分发，
+                        // 此时 JwtAuthenticationFilter（OncePerRequestFilter）默认跳过异步分发，
+                        // SecurityContext 为空，若不放行会被 AuthorizationFilter 拒绝并抛出
+                        // "Unable to handle the Spring Security Exception because the response is already
+                        // committed"，导致 chunked 终结符永远发不出去、客户端流式读取等不到 done
+                        .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                         // OPTIONS 预检请求必须放行，否则前端跨域请求会被拦截
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         // 登录/注册接口 + 公开科室列表（医生登录页下拉用）
